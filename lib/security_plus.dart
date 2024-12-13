@@ -41,9 +41,9 @@ class SecurityPlus {
     return isDevelopmentModeEnable;
   }
 
-  static Future<bool> get isMockLocationEnabled async {
-    final bool isMockLocationEnabled =
-        await _channel.invokeMethod('isMockLocationEnabled');
-    return isMockLocationEnabled;
-  }
+  // static Future<bool> get isMockLocationEnabled async {
+  //   final bool isMockLocationEnabled =
+  //       await _channel.invokeMethod('isMockLocationEnabled');
+  //   return isMockLocationEnabled;
+  // }
 }
