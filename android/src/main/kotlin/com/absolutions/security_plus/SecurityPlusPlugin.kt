@@ -4,7 +4,6 @@ import android.Manifest
 import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
-import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
 import android.location.LocationManager
 import android.os.Build
@@ -47,9 +46,12 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
     fun isRooted(): Boolean {
         val rootBeer = RootBeer(context)
         val root = rootBeer.isRooted
-        val extra =
-            checkFridaLibraries() || checkFridaProcesses() || checkSuspiciousFiles() || checkSuPaths() ||
-            detectHooks() || isSuperuserAppInstalled(context)
+        val extra = checkFridaLibraries() ||
+                checkFridaProcesses() ||
+                checkSuspiciousFiles() ||
+                checkSuPaths() ||
+                detectHooks() ||
+                isSuperuserAppInstalled(context)
         return root || extra
     }
 
@@ -57,7 +59,8 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
 
     private fun checkFridaProcesses(): Boolean {
         val suspicious = arrayOf(
-            "frida", "frida-server", "frida-helper", "frida-agent", "magisk", "magiskd"
+            "frida", "frida-server", "frida-helper", "frida-agent",
+            "magisk", "magiskd"
         )
         return try {
             val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "ps -A || ps"))
@@ -97,7 +100,7 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
         val libs = arrayOf("frida-agent", "frida-gadget", "frida")
         return try {
             File("/proc/self/maps").useLines { seq ->
-                seq.any { line -> libs.any { line.contains(it) } }
+                seq.any { line -> libs.any { line in it } }
             }
         } catch (_: Exception) {
             false
@@ -109,9 +112,10 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
             val rt = Runtime.getRuntime()
             val field = rt.javaClass.getDeclaredField("nativeLoad")
             field.isAccessible = true
+            // If accessible, we don't immediately assume hooking.
             false
         } catch (_: Exception) {
-            // If reflection is blocked or field not present, treat as suspicious.
+            // If reflection blocked / field missing, treat as suspicious.
             true
         }
     }
@@ -119,8 +123,14 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
     private fun isSuperuserAppInstalled(ctx: Context): Boolean {
         val pm = ctx.packageManager ?: return false
         val apps: List<ApplicationInfo> = runCatching {
-            @Suppress("DEPRECATION")
-            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getInstalledApplications(
+                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong())
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            }
         }.getOrDefault(emptyList())
 
         val suPkgs = setOf(
@@ -151,16 +161,16 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
     }
 
     private fun isEmulator(): Boolean {
-        return (Build.FINGERPRINT.startsWith("generic")
-                || Build.FINGERPRINT.startsWith("unknown")
-                || Build.MODEL.contains("google_sdk", ignoreCase = true)
-                || Build.MODEL.contains("Emulator", ignoreCase = true)
-                || Build.MODEL.contains("Android SDK built for x86", ignoreCase = true)
-                || Build.MANUFACTURER.contains("Genymotion", ignoreCase = true)
-                || Build.MODEL.startsWith("sdk_", ignoreCase = true)
-                || Build.DEVICE.startsWith("emulator", ignoreCase = true)
-                || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
-                || Build.PRODUCT == "google_sdk")
+        return (Build.FINGERPRINT.startsWith("generic") ||
+                Build.FINGERPRINT.startsWith("unknown") ||
+                Build.MODEL.contains("google_sdk", true) ||
+                Build.MODEL.contains("Emulator", true) ||
+                Build.MODEL.contains("Android SDK built for x86", true) ||
+                Build.MANUFACTURER.contains("Genymotion", true) ||
+                Build.MODEL.startsWith("sdk_", true) ||
+                Build.DEVICE.startsWith("emulator", true) ||
+                (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic")) ||
+                Build.PRODUCT == "google_sdk")
     }
 
     private fun developmentModeCheck(ctx: Context): Boolean {
@@ -186,20 +196,27 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
     }
 
     fun isMockLocationEnabled(ctx: Context): Boolean {
-        // 1) AppOps check (best-effort; may throw/return MODE_ERRORED on newer Android)
+        // 1) AppOps check (best-effort)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
             val aom = ctx.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
             try {
                 if (aom != null) {
-                    val mode = aom.checkOp(AppOpsManager.OPSTR_MOCK_LOCATION, Process.myUid(), ctx.packageName)
+                    val mode = aom.checkOp(
+                        AppOpsManager.OPSTR_MOCK_LOCATION,
+                        Process.myUid(),
+                        ctx.packageName
+                    )
                     if (mode == AppOpsManager.MODE_ALLOWED) return true
                 }
             } catch (_: Exception) { /* ignore */ }
         } else {
-            // 2) Legacy global dev setting (pre-M)
+            // 2) Legacy (pre-M) developer setting
             @Suppress("DEPRECATION")
             try {
-                val s = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ALLOW_MOCK_LOCATION)
+                val s = Settings.Secure.getString(
+                    ctx.contentResolver,
+                    Settings.Secure.ALLOW_MOCK_LOCATION
+                )
                 if (!s.isNullOrEmpty()) return true
             } catch (_: Exception) { /* ignore */ }
         }
@@ -210,8 +227,8 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
             ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
 
         if (hasLocationPerm) {
-            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
-            val providers = lm?.allProviders ?: emptyList()
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager ?: return false
+            val providers = lm.allProviders ?: emptyList()
             for (p in providers) {
                 if (p == LocationManager.GPS_PROVIDER || p == LocationManager.NETWORK_PROVIDER) {
                     try {
@@ -222,12 +239,12 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
             }
         }
         return false
-        }
+    }
 
     private fun isOnExternalStorage(ctx: Context): Boolean {
         val pm = ctx.packageManager ?: return false
 
-        // Prefer getApplicationInfo for SDK 33+
+        // Prefer getApplicationInfo for SDK 33+; safe fallback for older
         val appInfo: ApplicationInfo? = runCatching {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
                 pm.getApplicationInfo(
