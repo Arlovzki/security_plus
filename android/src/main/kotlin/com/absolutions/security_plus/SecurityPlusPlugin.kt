@@ -1,39 +1,35 @@
 package com.absolutions.security_plus
 
+import android.Manifest
+import android.app.AppOpsManager
 import android.content.Context
 import android.content.pm.ApplicationInfo
 import android.content.pm.PackageInfo
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
+import android.os.Debug
+import android.os.Process
+import android.provider.Settings
+import androidx.core.content.ContextCompat
 import com.scottyab.rootbeer.RootBeer
-
 import io.flutter.embedding.engine.plugins.FlutterPlugin
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler
 import io.flutter.plugin.common.MethodChannel.Result
-import android.location.LocationManager
-import android.app.AppOpsManager
-import android.os.Process
-import android.provider.Settings
-
-import androidx.core.content.ContextCompat
-import android.Manifest
-
-import android.os.Debug
 import java.io.BufferedReader
+import java.io.File
 import java.io.InputStreamReader
 
-import java.io.File
-
 /** SecurityPlusPlugin */
-class SecurityPlusPlugin: FlutterPlugin, MethodCallHandler {
-    private lateinit var channel : MethodChannel
+class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
+    private lateinit var channel: MethodChannel
     private lateinit var context: Context
 
-    override fun onAttachedToEngine(flutterPluginBinding: FlutterPlugin.FlutterPluginBinding) {
-        context = flutterPluginBinding.applicationContext
-        channel = MethodChannel(flutterPluginBinding.binaryMessenger, "security_plus")
+    override fun onAttachedToEngine(binding: FlutterPlugin.FlutterPluginBinding) {
+        context = binding.applicationContext
+        channel = MethodChannel(binding.binaryMessenger, "security_plus")
         channel.setMethodCallHandler(this)
     }
 
@@ -50,109 +46,84 @@ class SecurityPlusPlugin: FlutterPlugin, MethodCallHandler {
 
     fun isRooted(): Boolean {
         val rootBeer = RootBeer(context)
-        val isRooted = rootBeer.isRooted
-        println("isRooted: ${isRooted || checkFridaLibraries() || checkFridaProcesses() || checkSuspiciousFiles()}")
-        return isRooted || checkFridaLibraries() || checkFridaProcesses() || checkSuspiciousFiles()
+        val root = rootBeer.isRooted
+        val extra =
+            checkFridaLibraries() || checkFridaProcesses() || checkSuspiciousFiles() || checkSuPaths() ||
+            detectHooks() || isSuperuserAppInstalled(context)
+        return root || extra
     }
 
-    private fun isDebuggerAttached(): Boolean {
-        return Debug.isDebuggerConnected()
-    }
+    private fun isDebuggerAttached(): Boolean = Debug.isDebuggerConnected()
 
     private fun checkFridaProcesses(): Boolean {
-        val suspiciousProcesses = arrayOf(
-            "frida", "frida-server", "frida-helper",
-            "frida-agent", "magisk", "magiskd"
+        val suspicious = arrayOf(
+            "frida", "frida-server", "frida-helper", "frida-agent", "magisk", "magiskd"
         )
-        
         return try {
-            val process = Runtime.getRuntime().exec("ps")
-            val reader = BufferedReader(InputStreamReader(process.inputStream))
-            var line: String?
-            
-            while (reader.readLine().also { line = it } != null) {
-                for (processName in suspiciousProcesses) {
-                    if (line?.lowercase()?.contains(processName) == true) {
-                        return true
-                    }
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "ps -A || ps"))
+            BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    val l = line!!.lowercase()
+                    if (suspicious.any { l.contains(it) }) return true
                 }
             }
             false
-        } catch (e: Exception) {
+        } catch (_: Exception) {
             false
         }
     }
 
     private fun checkSuspiciousFiles(): Boolean {
-        val suspiciousFiles = arrayOf(
+        val paths = arrayOf(
             "/system/app/Superuser.apk",
             "/system/etc/init.d/99SuperSUDaemon",
             "/dev/com.koushikdutta.superuser.daemon/",
             "/system/xbin/daemonsu",
-            "/sbin/su",
-            "/system/bin/su",
-            "/system/xbin/su",
-            "/data/local/xbin/su",
-            "/data/local/bin/su",
-            "/system/sd/xbin/su",
-            "/system/bin/failsafe/su",
-            "/data/local/su",
-            "/su/bin/su"
+            "/sbin/su", "/system/bin/su", "/system/xbin/su",
+            "/data/local/xbin/su", "/data/local/bin/su",
+            "/system/sd/xbin/su", "/system/bin/failsafe/su",
+            "/data/local/su", "/su/bin/su"
         )
-        
-        for (path in suspiciousFiles) {
-            if (File(path).exists()) {
-                return true
-            }
-        }
-        return false
+        return paths.any { File(it).exists() }
     }
 
     private fun checkSuPaths(): Boolean {
-        val paths = System.getenv("PATH")?.split(":") ?: return false
-        for (path in paths) {
-            if (File(path + "/su").exists()) {
-                return true
-            }
-        }
-        return false
+        val env = System.getenv("PATH") ?: return false
+        return env.split(':').any { p -> File("$p/su").exists() }
     }
 
     private fun checkFridaLibraries(): Boolean {
-        val libraries = arrayOf(
-            "frida-agent",
-            "frida-gadget",
-            "frida"
-        )
-        
-        try {
-            val maps = File("/proc/self/maps").readLines()
-            for (line in maps) {
-                for (lib in libraries) {
-                    if (line.contains(lib)) {
-                        return true
-                    }
-                }
+        val libs = arrayOf("frida-agent", "frida-gadget", "frida")
+        return try {
+            File("/proc/self/maps").useLines { seq ->
+                seq.any { line -> libs.any { line.contains(it) } }
             }
-        } catch (e: Exception) {
-            // Ignore exceptions
+        } catch (_: Exception) {
+            false
         }
-        return false
     }
 
     private fun detectHooks(): Boolean {
         return try {
-            val runtime = Runtime.getRuntime()
-            val field = runtime.javaClass.getDeclaredField("nativeLoad")
+            val rt = Runtime.getRuntime()
+            val field = rt.javaClass.getDeclaredField("nativeLoad")
             field.isAccessible = true
             false
-        } catch (e: Exception) {
+        } catch (_: Exception) {
+            // If reflection is blocked or field not present, treat as suspicious.
             true
         }
     }
 
-    private fun isSuperuserAppInstalled(context: Context): Boolean {
-        val suspiciousPackages = arrayOf(
+    private fun isSuperuserAppInstalled(ctx: Context): Boolean {
+        val pm = ctx.packageManager ?: return false
+        val apps: List<ApplicationInfo> = runCatching {
+            @Suppress("DEPRECATION")
+            pm.getInstalledApplications(PackageManager.GET_META_DATA)
+        }.getOrDefault(emptyList())
+
+        val suPkgs = setOf(
             "eu.chainfire.supersu",
             "com.koushikdutta.superuser",
             "com.thirdparty.superuser",
@@ -163,120 +134,128 @@ class SecurityPlusPlugin: FlutterPlugin, MethodCallHandler {
             "com.zhiqupk.root.global",
             "com.alephzain.framaroot"
         )
-        
-        val packages: List<ApplicationInfo> = context.packageManager.getInstalledApplications(PackageManager.GET_META_DATA)
-        for (packageInfo in packages) {
-            if (suspiciousPackages.any { packageInfo.packageName.equals(it, ignoreCase = true) }) {
-                return true
-            }
+        for (ai in apps) {
+            val pkg = ai.packageName
+            if (pkg != null && pkg in suPkgs) return true
         }
         return false
     }
 
     private fun isRunningInAPKMode(): Boolean {
-        var cmdlineReader: BufferedReader? = null
-        try {
-            val process = Runtime.getRuntime().exec(arrayOf("/system/bin/getprop", "ro.debuggable"))
-            cmdlineReader = BufferedReader(InputStreamReader(process.inputStream))
-            return cmdlineReader.readLine() == "1"
-        } catch (t: Throwable) {
-            t.printStackTrace()
-        } finally {
-            cmdlineReader?.close()
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("/system/bin/getprop", "ro.debuggable"))
+            BufferedReader(InputStreamReader(proc.inputStream)).use { it.readLine() == "1" }
+        } catch (_: Throwable) {
+            false
         }
-        return false
     }
 
     private fun isEmulator(): Boolean {
         return (Build.FINGERPRINT.startsWith("generic")
                 || Build.FINGERPRINT.startsWith("unknown")
-                || Build.MODEL.contains("google_sdk")
-                || Build.MODEL.contains("Emulator")
-                || Build.MODEL.contains("Android SDK built for x86")
-                || Build.MANUFACTURER.contains("Genymotion")
-                || Build.MODEL.startsWith("sdk_")
-                || Build.DEVICE.startsWith("emulator")) || Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith(
-            "generic"
-        ) || "google_sdk" == Build.PRODUCT
+                || Build.MODEL.contains("google_sdk", ignoreCase = true)
+                || Build.MODEL.contains("Emulator", ignoreCase = true)
+                || Build.MODEL.contains("Android SDK built for x86", ignoreCase = true)
+                || Build.MANUFACTURER.contains("Genymotion", ignoreCase = true)
+                || Build.MODEL.startsWith("sdk_", ignoreCase = true)
+                || Build.DEVICE.startsWith("emulator", ignoreCase = true)
+                || (Build.BRAND.startsWith("generic") && Build.DEVICE.startsWith("generic"))
+                || Build.PRODUCT == "google_sdk")
     }
 
-    private fun developmentModeCheck(context: Context): Boolean {
-        return if (Integer.valueOf(Build.VERSION.SDK_INT) == 16) {
-            android.provider.Settings.Secure.getInt(
-                context.contentResolver,
-                android.provider.Settings.Secure.DEVELOPMENT_SETTINGS_ENABLED, 0
-            ) != 0
-        } else if (Integer.valueOf(Build.VERSION.SDK_INT) >= 17) {
-            android.provider.Settings.Secure.getInt(
-                context.contentResolver,
-                android.provider.Settings.Global.DEVELOPMENT_SETTINGS_ENABLED, 0
-            ) != 0
-        } else false
+    private fun developmentModeCheck(ctx: Context): Boolean {
+        return when {
+            Build.VERSION.SDK_INT == 16 -> {
+                @Suppress("DEPRECATION")
+                Settings.Secure.getInt(
+                    ctx.contentResolver,
+                    Settings.Secure.DEVELOPMENT_SETTINGS_ENABLED,
+                    0
+                ) != 0
+            }
+            Build.VERSION.SDK_INT >= 17 -> {
+                @Suppress("DEPRECATION")
+                Settings.Secure.getInt(
+                    ctx.contentResolver,
+                    Settings.Global.DEVELOPMENT_SETTINGS_ENABLED,
+                    0
+                ) != 0
+            }
+            else -> false
+        }
     }
-    
-    fun isMockLocationEnabled(context: Context): Boolean {
+
+    fun isMockLocationEnabled(ctx: Context): Boolean {
+        // 1) AppOps check (best-effort; may throw/return MODE_ERRORED on newer Android)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
-            // checking if the app have mock location permission
-            val appOpsManager = context.getSystemService(Context.APP_OPS_SERVICE) as AppOpsManager
+            val aom = ctx.getSystemService(Context.APP_OPS_SERVICE) as? AppOpsManager
             try {
-                val isMockLocationEnabled = appOpsManager.checkOp(AppOpsManager.OPSTR_MOCK_LOCATION, Process.myUid(), context.packageName) == AppOpsManager.MODE_ALLOWED
-                if (isMockLocationEnabled) {
-                    return true
+                if (aom != null) {
+                    val mode = aom.checkOp(AppOpsManager.OPSTR_MOCK_LOCATION, Process.myUid(), ctx.packageName)
+                    if (mode == AppOpsManager.MODE_ALLOWED) return true
                 }
-            } catch (e: Exception) {
-                // ignore
-            }
+            } catch (_: Exception) { /* ignore */ }
         } else {
-            // checking if mock location enabled in developer options
+            // 2) Legacy global dev setting (pre-M)
+            @Suppress("DEPRECATION")
             try {
-                val isMockLocationEnabled = !Settings.Secure.getString(context.contentResolver, Settings.Secure.ALLOW_MOCK_LOCATION).isNullOrEmpty()
-                if (isMockLocationEnabled) {
-                    return true
-                }
-            } catch (e: Settings.SettingNotFoundException) {
-                // ignore
-            }
-        }
-    
-        // checking on any other app
-        val locationManager = context.getSystemService(Context.LOCATION_SERVICE) as LocationManager
-        val providers = locationManager.allProviders
-        for (provider in providers) {
-            if (LocationManager.GPS_PROVIDER == provider || LocationManager.NETWORK_PROVIDER == provider) {
-                if (locationManager.isProviderEnabled(provider)) {
-                    // gps or network enabled so we check if its providing mock location
-                    val location = locationManager.getLastKnownLocation(provider)
-                    if (location != null && location.isFromMockProvider) {
-                        return true
-                    }
-                }
-            }
-        }
-    
-        return false
-    }
-    
-    private fun isOnExternalStorage(context: Context): Boolean {
-        val pm: PackageManager = context.packageManager
-        try {
-            val pi: PackageInfo = pm.getPackageInfo(context.packageName, 0)
-            val ai: ApplicationInfo = pi.applicationInfo
-            return ai.flags and ApplicationInfo.FLAG_EXTERNAL_STORAGE === ApplicationInfo.FLAG_EXTERNAL_STORAGE
-        } catch (e: PackageManager.NameNotFoundException) {
-            // ignore
+                val s = Settings.Secure.getString(ctx.contentResolver, Settings.Secure.ALLOW_MOCK_LOCATION)
+                if (!s.isNullOrEmpty()) return true
+            } catch (_: Exception) { /* ignore */ }
         }
 
-        try {
-            val filesDir: String = context.filesDir.absolutePath
-            if (filesDir.startsWith("/data/")) {
-                return false
-            } else if (filesDir.contains("/mnt/") || filesDir.contains("/sdcard/")) {
-                return true
+        // 3) Heuristic: last known location flagged as mock (needs location permission)
+        val hasLocationPerm =
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+            ContextCompat.checkSelfPermission(ctx, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+
+        if (hasLocationPerm) {
+            val lm = ctx.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+            val providers = lm?.allProviders ?: emptyList()
+            for (p in providers) {
+                if (p == LocationManager.GPS_PROVIDER || p == LocationManager.NETWORK_PROVIDER) {
+                    try {
+                        val loc = lm.getLastKnownLocation(p)
+                        if (loc != null && loc.isFromMockProvider) return true
+                    } catch (_: SecurityException) { /* ignore */ }
+                }
             }
-        } catch (e: Throwable) {
-            // ignore
         }
         return false
+        }
+
+    private fun isOnExternalStorage(ctx: Context): Boolean {
+        val pm = ctx.packageManager ?: return false
+
+        // Prefer getApplicationInfo for SDK 33+
+        val appInfo: ApplicationInfo? = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getApplicationInfo(
+                    ctx.packageName,
+                    PackageManager.ApplicationInfoFlags.of(0)
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getApplicationInfo(ctx.packageName, 0)
+            }
+        }.getOrNull()
+
+        if (appInfo != null) {
+            val onExternal = (appInfo.flags and ApplicationInfo.FLAG_EXTERNAL_STORAGE) == ApplicationInfo.FLAG_EXTERNAL_STORAGE
+            if (onExternal) return true
+        }
+
+        // Fallback by inspecting filesDir path (best-effort)
+        return try {
+            val path = ctx.filesDir?.absolutePath ?: return false
+            when {
+                path.startsWith("/data/") -> false
+                path.contains("/mnt/") || path.contains("/sdcard/") -> true
+                else -> false
+            }
+        } catch (_: Throwable) {
+            false
+        }
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
