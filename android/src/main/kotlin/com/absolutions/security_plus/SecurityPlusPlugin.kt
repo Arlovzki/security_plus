@@ -21,7 +21,7 @@ import java.io.BufferedReader
 import java.io.File
 import java.io.InputStreamReader
 
-/** SecurityPlusPlugin */
+/** SecurityPlusPlugin (fixed) */
 class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
     private lateinit var channel: MethodChannel
     private lateinit var context: Context
@@ -39,125 +39,30 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
             "isOnExternalStorage" -> result.success(isOnExternalStorage(context))
             "isDevelopmentModeEnable" -> result.success(developmentModeCheck(context))
             "isMockLocationEnabled" -> result.success(isMockLocationEnabled(context))
+            // Optional: expose which signals fired for debugging in QA builds
+            "getRootSignals" -> {
+                val s = collectRootSignals()
+                result.success(
+                    mapOf(
+                        "rootBeer" to s.rootBeer,
+                        "fridaLibs" to s.fridaLibs,
+                        "fridaProcs" to s.fridaProcs,
+                        "suspiciousFiles" to s.suspiciousFiles,
+                        "suInPath" to s.suInPath,
+                        "suApps" to s.suApps,
+                        "debuggerAttached" to s.debuggerAttached
+                    )
+                )
+            }
             else -> result.notImplemented()
         }
     }
 
+    // ---- Public checks ----
+
     fun isRooted(): Boolean {
-        val rootBeer = RootBeer(context)
-        val root = rootBeer.isRooted
-        val extra = checkFridaLibraries() ||
-                checkFridaProcesses() ||
-                checkSuspiciousFiles() ||
-                checkSuPaths() ||
-                detectHooks() ||
-                isSuperuserAppInstalled(context)
-        return root || extra
-    }
-
-    private fun isDebuggerAttached(): Boolean = Debug.isDebuggerConnected()
-
-    private fun checkFridaProcesses(): Boolean {
-        val suspicious = arrayOf(
-            "frida", "frida-server", "frida-helper", "frida-agent",
-            "magisk", "magiskd"
-        )
-        return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "ps -A || ps"))
-            BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
-                var line: String?
-                while (reader.readLine().also { line = it } != null) {
-                    val l = line!!.lowercase()
-                    if (suspicious.any { l.contains(it) }) return true
-                }
-            }
-            false
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun checkSuspiciousFiles(): Boolean {
-        val paths = arrayOf(
-            "/system/app/Superuser.apk",
-            "/system/etc/init.d/99SuperSUDaemon",
-            "/dev/com.koushikdutta.superuser.daemon/",
-            "/system/xbin/daemonsu",
-            "/sbin/su", "/system/bin/su", "/system/xbin/su",
-            "/data/local/xbin/su", "/data/local/bin/su",
-            "/system/sd/xbin/su", "/system/bin/failsafe/su",
-            "/data/local/su", "/su/bin/su"
-        )
-        return paths.any { File(it).exists() }
-    }
-
-    private fun checkSuPaths(): Boolean {
-        val env = System.getenv("PATH") ?: return false
-        return env.split(':').any { p -> File("$p/su").exists() }
-    }
-
-    private fun checkFridaLibraries(): Boolean {
-        val libs = arrayOf("frida-agent", "frida-gadget", "frida")
-        return try {
-            File("/proc/self/maps").useLines { seq ->
-                seq.any { line -> libs.any { line in it } }
-            }
-        } catch (_: Exception) {
-            false
-        }
-    }
-
-    private fun detectHooks(): Boolean {
-        return try {
-            val rt = Runtime.getRuntime()
-            val field = rt.javaClass.getDeclaredField("nativeLoad")
-            field.isAccessible = true
-            // If accessible, we don't immediately assume hooking.
-            false
-        } catch (_: Exception) {
-            // If reflection blocked / field missing, treat as suspicious.
-            true
-        }
-    }
-
-    private fun isSuperuserAppInstalled(ctx: Context): Boolean {
-        val pm = ctx.packageManager ?: return false
-        val apps: List<ApplicationInfo> = runCatching {
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                pm.getInstalledApplications(
-                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong())
-                )
-            } else {
-                @Suppress("DEPRECATION")
-                pm.getInstalledApplications(PackageManager.GET_META_DATA)
-            }
-        }.getOrDefault(emptyList())
-
-        val suPkgs = setOf(
-            "eu.chainfire.supersu",
-            "com.koushikdutta.superuser",
-            "com.thirdparty.superuser",
-            "com.topjohnwu.magisk",
-            "com.kingroot.kinguser",
-            "com.kingo.root",
-            "com.smedialink.oneclickroot",
-            "com.zhiqupk.root.global",
-            "com.alephzain.framaroot"
-        )
-        for (ai in apps) {
-            val pkg = ai.packageName
-            if (pkg != null && pkg in suPkgs) return true
-        }
-        return false
-    }
-
-    private fun isRunningInAPKMode(): Boolean {
-        return try {
-            val proc = Runtime.getRuntime().exec(arrayOf("/system/bin/getprop", "ro.debuggable"))
-            BufferedReader(InputStreamReader(proc.inputStream)).use { it.readLine() == "1" }
-        } catch (_: Throwable) {
-            false
-        }
+        val s = collectRootSignals()
+        return s.isRootedLike()
     }
 
     private fun isEmulator(): Boolean {
@@ -273,6 +178,123 @@ class SecurityPlusPlugin : FlutterPlugin, MethodCallHandler {
         } catch (_: Throwable) {
             false
         }
+    }
+
+    // ---- Root & hook signals (fixed) ----
+
+    private fun isDebuggerAttached(): Boolean = Debug.isDebuggerConnected()
+
+    private fun checkFridaProcesses(): Boolean {
+        val suspicious = arrayOf(
+            "frida", "frida-server", "frida-helper", "frida-agent",
+            "magisk", "magiskd"
+        )
+        return try {
+            val proc = Runtime.getRuntime().exec(arrayOf("sh", "-c", "ps -A || ps"))
+            BufferedReader(InputStreamReader(proc.inputStream)).use { reader ->
+                var line: String?
+                while (reader.readLine().also { line = it } != null) {
+                    val l = line!!.lowercase()
+                    if (suspicious.any { token -> l.contains(token) }) return true
+                }
+            }
+            false
+        } catch (_: Exception) {
+            // Treat failure as unknown, not positive
+            false
+        }
+    }
+
+    private fun checkSuspiciousFiles(): Boolean {
+        val paths = arrayOf(
+            "/system/app/Superuser.apk",
+            "/system/etc/init.d/99SuperSUDaemon",
+            "/dev/com.koushikdutta.superuser.daemon/",
+            "/system/xbin/daemonsu",
+            "/sbin/su", "/system/bin/su", "/system/xbin/su",
+            "/data/local/xbin/su", "/data/local/bin/su",
+            "/system/sd/xbin/su", "/system/bin/failsafe/su",
+            "/data/local/su", "/su/bin/su"
+        )
+        return paths.any { p -> File(p).exists() }
+    }
+
+    private fun checkSuPaths(): Boolean {
+        val env = System.getenv("PATH") ?: return false
+        return env.split(':').any { p ->
+            File("$p/su").let { it.exists() && it.canExecute() }
+        }
+    }
+
+    private fun checkFridaLibraries(): Boolean {
+        val libs = arrayOf("frida-agent", "frida-gadget", "frida")
+        return try {
+            File("/proc/self/maps").useLines { seq ->
+                seq.any { line -> libs.any { token -> line.contains(token, ignoreCase = true) } }
+            }
+        } catch (_: Exception) {
+            // Treat failure as unknown, not positive
+            false
+        }
+    }
+
+    private fun isSuperuserAppInstalled(ctx: Context): Boolean {
+        val pm = ctx.packageManager ?: return false
+        val apps: List<ApplicationInfo> = runCatching {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                pm.getInstalledApplications(
+                    PackageManager.ApplicationInfoFlags.of(PackageManager.GET_META_DATA.toLong())
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                pm.getInstalledApplications(PackageManager.GET_META_DATA)
+            }
+        }.getOrDefault(emptyList())
+
+        val suPkgs = setOf(
+            "eu.chainfire.supersu",
+            "com.koushikdutta.superuser",
+            "com.thirdparty.superuser",
+            "com.topjohnwu.magisk",
+            "com.kingroot.kinguser",
+            "com.kingo.root",
+            "com.smedialink.oneclickroot",
+            "com.zhiqupk.root.global",
+            "com.alephzain.framaroot"
+        )
+        for (ai in apps) {
+            val pkg = ai.packageName
+            if (pkg != null && pkg in suPkgs) return true
+        }
+        return false
+    }
+
+    // ---- Diagnostics ----
+
+    private data class RootSignals(
+        val rootBeer: Boolean,
+        val fridaLibs: Boolean,
+        val fridaProcs: Boolean,
+        val suspiciousFiles: Boolean,
+        val suInPath: Boolean,
+        val suApps: Boolean,
+        val debuggerAttached: Boolean
+    ) {
+        fun isRootedLike(): Boolean =
+            rootBeer || fridaLibs || fridaProcs || suspiciousFiles || suInPath || suApps
+    }
+
+    private fun collectRootSignals(): RootSignals {
+        val rootBeer = RootBeer(context).isRooted
+        return RootSignals(
+            rootBeer = rootBeer,
+            fridaLibs = checkFridaLibraries(),
+            fridaProcs = checkFridaProcesses(),
+            suspiciousFiles = checkSuspiciousFiles(),
+            suInPath = checkSuPaths(),
+            suApps = isSuperuserAppInstalled(context),
+            debuggerAttached = isDebuggerAttached()
+        )
     }
 
     override fun onDetachedFromEngine(binding: FlutterPlugin.FlutterPluginBinding) {
